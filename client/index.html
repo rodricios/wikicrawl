@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title></title>
+    <style>
+        .node {
+        opacity: 0.5;
+        }
+
+        .node:hover {
+        opacity: 1;
+        }
+
+        .link {
+        stroke: #999;
+        stroke-opacity: 0.3;
+        }
+        
+        #wiki-form input {
+            height: 20px;
+        }
+
+    </style>
+    <script src="d3.js"></script>
+</head>
+<body>
+    <div id="wiki-form" style="display:inline-block;">
+        <input id="wiki-article" type="text" value="Andrey Markov" placeholder="Wikipedia article">
+        <input id="wiki-count" type="text" value="100" placeholder="Number of articles">
+        <input id="wiki-date" value="2002-01-01" type="date">
+        <button id="wiki-submit">Submit</button>
+        <button id="wiki-cliques">Cliques</button>
+    </div>
+
+    <div id="viz"></div>
+
+    <script>
+        var DEBUG = false,
+            websocket;
+
+        d3.select("#wiki-submit")
+            .on("click", function(d) {
+                    var title = document.getElementById("wiki-article").value,
+                        count = document.getElementById("wiki-count").value,
+                        date = document.getElementById("wiki-date").value;
+
+                    date = date.split("-");
+                    date = {year:Number(date[0]), month:Number(date[1]), day:Number(date[2])};
+                    count = Number(count);
+
+                    var data = {
+                        title: title,
+                        count: count,
+                        date: date,
+                        type: "crawl"
+                    };
+
+                    websocket = setupWebSocket(data);
+
+                    console.log(this);
+                });
+
+        d3.select("#wiki-cliques")
+            .on("click", function(d) {
+                    websocket.send({type:"cliques"})
+                })
+
+        var width = screen.width,
+            height = screen.height;
+
+        var color = d3.scale.category20();
+
+        var nodes = [],
+            links = [];
+
+        var force = d3.layout.force()
+            .nodes(nodes)
+            .links(links)
+            .charge(-400)
+            .linkDistance(40)
+            .size([width, height])
+            .on("tick", tick);
+
+        var svg = d3.select("body").append("svg")
+            .attr("width", width)
+            .attr("height", height);
+
+        var node = svg.selectAll(".node"),
+            link = svg.selectAll(".link");
+
+        function updateGraph(vertices, edges) {
+            force.nodes(vertices);
+            force.links(edges);
+            start();
+        }
+
+        updateGraph(nodes, links);
+
+        function start() {
+            link = link.data(force.links());//, function(d) { return d.source.id + "-" + d.target.id; });
+            link.enter()
+                .insert("line", ".node")
+                .attr("class", "link");
+
+            link.exit().remove();
+
+            node = node.data(force.nodes(), function(d) { return d.id;});
+            node.enter()
+                .append("circle")
+                .attr("class", function(d) { return "node " + d.id; })
+                .attr("r", 8)
+                .call(force.drag)
+                .append('svg:title')
+                .text(function(d) { return d.name; });
+
+            node.exit().remove();
+
+            force.start();
+        }
+
+        function tick() {
+          node.attr("cx", function(d) { return d.x; })
+              .attr("cy", function(d) { return d.y; })
+
+          link.attr("x1", function(d) { return d.source.x; })
+              .attr("y1", function(d) { return d.source.y; })
+              .attr("x2", function(d) { return d.target.x; })
+              .attr("y2", function(d) { return d.target.y; });
+        }
+
+
+        var Index = function() {
+            this._index = {};
+            this._numberOfKeys = 0;
+            this.getKeyValue = function(key) {
+                if (this._index.hasOwnProperty(key)) {
+                    return this._index[key];
+                } else {
+                    this._index[key] = this._numberOfKeys;
+
+                    this._numberOfKeys += 1;
+
+                    return this._index[key];
+                }
+            }
+            this.hasKey = function(key) {
+                return this._index.hasOwnProperty(key);
+            }
+        }
+
+        var Set = function() {
+            this._set = {};
+
+            this._cardinality = 0;
+
+            this.hasElement = function(element) {
+                return this._set.hasOwnProperty(element);
+            }
+
+            this.insert = function(element) {
+                if (this.hasElement(element)) return false;
+
+                this._set[element] = 1;
+                this._cardinality += 1;
+                return true;
+            }
+
+            this.elements = function() {
+                return Object.keys(this._set);
+            }
+
+            this.cardinality = function() {
+                return this._cardinality;
+            }
+
+            this.size = this.cardinality;
+        }
+
+        var nodeIndex = new Index();
+
+        var nodeset = new Set(),
+            edgeset = new Set();
+
+        function setupWebSocket(data){
+            this.ws = new WebSocket('ws://127.0.0.1:8765/sync');
+            this.ws.onerror = function() {
+                if (DEBUG) console.log("error");
+            }
+            this.ws.onopen =  function(event) {
+                if (DEBUG) console.log("opened connections");
+
+
+                if (DEBUG) console.log("sending data:", data);
+
+                ws.send(JSON.stringify(data));
+            }
+            this.ws.onmessage = function (event) {
+                var data = JSON.parse(event.data),
+                    firstLabel = data[0],
+                    secondLabel = data[1];
+
+                var firstNode = {},
+                    secondNode = {},
+                    edge = {};
+
+                firstNode["id"] = nodeIndex.getKeyValue(firstLabel);
+                firstNode["name"] = firstLabel;
+                //firstNode["group"] = 2;
+
+                if (nodeset.insert(firstNode.id.toString())) {
+                    nodes.push(firstNode);
+                }
+
+                secondNode["id"] = nodeIndex.getKeyValue(secondLabel);
+                secondNode["name"] = secondLabel;
+                //secondNode["group"] = 2;
+
+                if (nodeset.insert(secondNode.id.toString())) {
+                    nodes.push(secondNode);
+                }
+
+                var edgeAsString = firstNode.id.toString()+","+secondNode.id.toString();
+
+                if (edgeset.insert(edgeAsString)) {
+                    // Ughhh, spent upwards of 30 minutes trying to find this bug...
+                    // source and target value types must match the node's id-field's type
+                    edge["source"] = firstNode.id;
+                    edge["target"] = secondNode.id;
+                    edge["value"] = 1;
+
+                    links.push(edge);
+                    if (DEBUG) console.log("Before update:", edge);
+
+                    start()
+                }
+            }
+
+            this.ws.onclose = function(){
+                //setTimeout(setupWebSocket, 1000);
+                if (DEBUG) console.log("closing")
+            };
+            return this.ws;
+        }
+
+        window.onbeforeunload = function(event) {
+            console.log(websocket);
+            websocket.onclose = function () {}; // disable onclose handler first
+            websocket.close();
+            console.log("about to refresh");
+            //return confirm();
+        };
+    </script>
+    <script>
+
+//        var CliqueFinder = function() {
+//            this._nodeToNodes = {};
+//
+//            this._cliques = new Set();
+//
+//            this.addEdge = function (edge) {
+//                var n2ns = this._nodeToNodes,
+//                    n2d = this._nodeToDegree,
+//                        firstNode = edge[0],
+//                        secondNode = edge[1];
+//
+//                if (!n2ns.hasOwnProperty(firstNode)) {
+//                    n2ns[firstNode] = new Set();
+//                }
+//
+//                if (!n2ns.hasOwnProperty(secondNode)) {
+//                    n2ns[secondNode] = new Set();
+//                }
+//
+//                n2ns[firstNode].insert(secondNode)
+//
+//                n2ns[secondNode].insert(firstNode)
+//            }
+//
+//            this.processEdgeToCliques = function(edge) {
+//                var n2ns = this._nodeToNodes,
+//                    firstNode = edge[0],
+//                    secondNode = edge[1],
+//                    firstNodeDegree = this.getDegree(firstNode),
+//                    secondNodeDegree = this.getDegree(secondNode);
+//
+//                if (firstNodeDegree == 1 && secondNodeDegree == 1) {
+//                    this._insertClique(edge);
+//                }
+//                else {
+//                    var firstNodeNeighbors = this.getNeighbors(firstNode),
+//                        secondNodeNeighbors = this.getNeighbors(secondNode);
+//
+//                    // preempt potential maximal cliques that are one
+//                    // edge from being fully connected - lowest to highest
+//                    var neighborsSortedByDegree = union_arrays(firstNodeNeighbors, secondNodeNeighbors)
+//                            .sort(function(a, b) {
+//                                return n2ns[a].size() - n2ns[b].size();
+//                            }).filter(function(n) {return n != firstNode && n != secondNode; });
+//
+//                    for (var i in neighborsSortedByDegree) {
+//
+//                    }
+//                    return neighborsSortedByDegree;
+//                }
+//            }
+//
+//            this.getDegree = function (node) {
+//                if (!this._nodeToNodes.hasOwnProperty(node)) return -1;
+//                return this._nodeToNodes[node].cardinality();
+//            }
+//
+//            this.getNeighbors = function (node) {
+//                if (!this._nodeToNodes.hasOwnProperty(node))
+//                    return [];
+//                return this._nodeToNodes[node].elements();
+//            }
+//
+//            this._insertClique = function (clique) {
+//                clique.sort();
+//                var clq = clique.join("&&");
+//                var clqs = this._cliques.elements();
+//                for (var i in clqs) {
+//                    if (clqs[i].indexOf(clq) != -1) return false;
+//                }
+//                this._cliques.insert(clq);
+//                return false;
+//            }
+//
+//            this.makesClique = function (edge) {
+//                var firstNode = edge[0],
+//                        secondNode = edge[1];
+//
+//                var firstNodeNeighbors = this.getNeighbors(firstNode),
+//                        secondNodeNeighbors = this.getNeighbors(secondNode);
+//
+//                return union_arrays(firstNodeNeighbors, secondNodeNeighbors);
+//            }
+//
+//            this.getDegrees = function() {
+//                var n2ns = this._nodeToNodes;
+//                return Object.keys(this._nodeToNodes).map(function(k) {
+//                    return [k, n2ns[k].cardinality()];
+//                });
+//            }
+//        }
+//
+//        function union_arrays(x, y) {
+//            var obj = {};
+//            for (var i = x.length - 1; i >= 0; --i)
+//                obj[x[i]] = x[i];
+//            for (var i = y.length - 1; i >= 0; --i)
+//                obj[y[i]] = y[i];
+//            var res = []
+//            for (var k in obj) {
+//                if (obj.hasOwnProperty(k))  // <-- optional
+//                    res.push(obj[k]);
+//            }
+//            return res;
+//        }
+    </script>
+</body>
+</html>

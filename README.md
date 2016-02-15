@@ -1,3 +1,0 @@
-# wikicrawl
-Crawl Wikipedia
-
