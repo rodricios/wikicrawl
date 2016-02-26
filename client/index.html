@@ -189,8 +189,7 @@
             }
             this.ws.onopen =  function(event) {
                 if (DEBUG) console.log("opened connections");
-
-
+                
                 if (DEBUG) console.log("sending data:", data);
 
                 ws.send(JSON.stringify(data));

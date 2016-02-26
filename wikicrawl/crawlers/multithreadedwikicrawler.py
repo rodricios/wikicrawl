@@ -6,13 +6,18 @@ import queue
 import re
 import asyncio
 from datetime import datetime
+import threading
 
 
-WIKILINK_RE = re.compile("\[\[(.*?)\]\]")
+__all__ = ["MultiThreadedWikiCrawler"]
+
+WIKILINK_RE = re.compile(r"\[\[(.*?)\]\]")
+
 WIKINAMESPACE_RE = re.compile(r"^File:|^Image:|^Category:|^simple:|^..:")
 
+RLOCK = threading.RLock()
 
-class WikiCrawler:
+class MultiThreadedWikiCrawler:
     """
     TODO: finish implementing proper caching update.
     """
@@ -37,15 +42,16 @@ class WikiCrawler:
         # canonical title to timestamp to revid
         self.ctitle_to_timestamps_to_revid = defaultdict(dict)
 
+        #self.q = queue.LifoQueue()
+        self.q = queue.Queue()
+
 
     def _get_wikipage(self, page_title):
         """"""
         if page_title in self.title_to_ctitle_table:
-
             page_title = self.title_to_ctitle_table[page_title]
 
         if page_title in self.ctitle_to_cpage_table:
-
             return self.ctitle_to_cpage_table[page_title]
 
         page = pywikibot.Page(self._wiki_site, page_title)
@@ -75,34 +81,37 @@ class WikiCrawler:
 
     def _get_revisions(self, page_title, debug=False):
         """"""
-        if debug:
-            print("Getting revisions for {0}".format(page_title))
-
-        page_title = self._get_canonical_page_title(page_title)
-
-        # check canonical title to revisions table
-        if page_title in self.ctitle_to_revisions:
-            return self.ctitle_to_revisions[page_title]
-
-        page = self._get_wikipage(page_title)
-
+        RLOCK.acquire()
         try:
-            # page.revisions() returns a generator
-            # sorted property/invariant
+            if debug:
+                print("Getting revisions for {0}".format(page_title))
+
+            page_title = self._get_canonical_page_title(page_title)
+
+            # check canonical title to revisions table
+            if page_title in self.ctitle_to_revisions:
+                return self.ctitle_to_revisions[page_title]
+
+            page = self._get_wikipage(page_title)
+
+            revisions = []
+            #try:
+                # page.revisions() returns a generator
+                # sorted property/invariant
             revisions = sorted(list(page.revisions()), key=lambda r: r['timestamp'])
         except Exception as e:
             if debug:
                 print(e)
-            return []
         else:
             self.ctitle_to_revisions[page_title] = revisions
+            #return revisions
+        finally:
+            RLOCK.release()
             return revisions
 
     def _get_revisionid_before_date(self, page_title, timestamp, debug=False):
         """"""
         page_title = self._get_canonical_page_title(page_title)
-
-        #timestamp = timestamp.toordinal()
 
         timestamps_to_revid = self.ctitle_to_timestamps_to_revid[page_title]
 
@@ -217,17 +226,14 @@ class WikiCrawler:
         seed_date = kwargs.get('seed_date', self.seed_date)
         seed_count = kwargs.get('seed_count', self.seed_count)
         debug = kwargs.get('debug', False)
+        q = self.q
 
         graph = nx.Graph()
 
         if debug:
             print("WikipediaCrawler.crawl_wiki starting")
 
-        q = queue.Queue()
-
         revid = self._get_revisionid_before_date(seed_page_title, seed_date, debug)
-
-        #revid = revid if revid else self._get_revisionid_nearest_to_date(seed_page_title, seed_date)
 
         if not revid:
             raise Exception("No wikipages for article {0} before date {1}".format(seed_page_title, seed_date))
@@ -235,6 +241,8 @@ class WikiCrawler:
         q.put((seed_page_title, revid))
 
         for page_title, revid in iter(q.get, None):
+            if len(graph) > seed_count:
+                break
             if debug:
                 print()
                 print("Number of nodes in graph: {0}".format(len(graph)))
@@ -261,12 +269,29 @@ class WikiCrawler:
 
                     graph.add_edge(page_title, outlink)
 
-            if len(graph) > seed_count:
-                break
-
         self.graphs.append(graph)
 
         return graph.edges()
+
+    def start_crawl(self, *args, **kwargs):
+        seed_page_title = kwargs.get('seed_page_title', self.seed_page_title)
+        seed_date = kwargs.get('seed_date', self.seed_date)
+        seed_count = kwargs.get('seed_count', self.seed_count)
+        num_of_threads = kwargs.get('num_of_threads', 2)
+
+        debug = kwargs.get('debug', False)
+
+        # Set up some threads to fetch the enclosures
+        for i in range(num_of_threads):
+            worker = threading.Thread(target=self.crawl, kwargs=kwargs)
+            worker.setDaemon(True)
+            worker.start()
+
+        if debug: print("Waiting for threads")
+
+        self.q.join()
+
+        if debug: print("Threads done")
 
     def crawl_iter(self, *args, **kwargs):
         """"""
@@ -279,7 +304,8 @@ class WikiCrawler:
 
         visited = set()
 
-        q = queue.Queue()
+        #q = queue.Queue()
+        q = queue.LifoQueue()
 
         revid = self._get_revisionid_before_date(seed_page_title, seed_date)
 

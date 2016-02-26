@@ -1,3 +1,4 @@
 __author__ = 'rodrigo'
 
-from .crawlers import WikipediaCrawler
+#from .crawlers import WikiCrawler# , MultiThreadedWikiCrawler
+
