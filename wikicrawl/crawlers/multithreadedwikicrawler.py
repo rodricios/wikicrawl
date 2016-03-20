@@ -13,7 +13,7 @@ __all__ = ["MultiThreadedWikiCrawler"]
 
 WIKILINK_RE = re.compile(r"\[\[(.*?)\]\]")
 
-WIKINAMESPACE_RE = re.compile(r"^File:|^Image:|^Category:|^simple:|^..:")
+WIKINAMESPACE_RE = re.compile(r"^File:|^Image:|^Category:|^simple:|^..:|^#.*")
 
 RLOCK = threading.RLock()
 
@@ -347,8 +347,7 @@ class MultiThreadedWikiCrawler:
                         visited.add((page_title, next_title))
                         yield [page_title, next_title]
 
-            self.graphs.append(self.graphs[-1])
-
+            self.graphs.append(self.graphs[-1])\
 
     def crawl_time_series(self, *args, **kwargs):
         seed_page_title = self.seed_page_title = kwargs.get('seed_page_title',
@@ -388,14 +387,14 @@ class MultiThreadedWikiCrawler:
 
         return time_series_payload
 
-    async def crawl_async(self, *args, **kwargs):
-        loop = kwargs.get('loop', asyncio.get_event_loop())
-
-        try:
-            del kwargs['loop']  # assuming searching doesn't take loop as an arg
-        except KeyError:
-            pass
-
-        # Passing None tells asyncio to use the default ThreadPoolExecutor
-        r = await loop.run_in_executor(None, self.crawl_wiki_iter, *args, **kwargs)
-        return r
+    # async def crawl_async(self, *args, **kwargs):
+    #     loop = kwargs.get('loop', asyncio.get_event_loop())
+    #
+    #     try:
+    #         del kwargs['loop']  # assuming searching doesn't take loop as an arg
+    #     except KeyError:
+    #         pass
+    #
+    #     # Passing None tells asyncio to use the default ThreadPoolExecutor
+    #     r = await loop.run_in_executor(None, self.crawl_wiki_iter, *args, **kwargs)
+    #     return r

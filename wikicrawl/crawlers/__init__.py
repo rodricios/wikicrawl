@@ -1,5 +1,3 @@
-__author__ = 'rodrigo'
-
-from .WikiCrawler import WikiCrawler
+from wikicrawl.crawlers.wikicrawler import WikiCrawler
 
 __all__ = ['WikiCrawler']

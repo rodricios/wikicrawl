@@ -21,23 +21,22 @@ class PyTest(TestCommand):
         errno = pytest.main(self.pytest_args)
         sys.exit(errno)
 
-
 def readme():
     with open('README.md') as f:
         return f.read()
 
-
 setup(
     name='wikicrawl',
-    version='0.0.010',
+    version='0.0.0',
     url='https://github.com/datalib/statscounter',
     license='MIT',
     description="Crawl today's and yesteryear's Wikipedia",
-    packages=['wikicrawl'],
+    packages=['wikicrawl', 'wikicrawl.crawlers'],
     include_package_data=True,
     zip_safe=False,
     platforms='any',
-    install_requires=['pywikibot', 'networkx', 'websockets'],
+    install_requires=['pywikibot', 'mwparserfromhell',
+                      'networkx', 'websockets', 'numpy', 'statscounter'],
     keywords='crawl wikipedia past history graph network science'
              'Wikipedia wp',
     author='Rodrigo Palacios',
