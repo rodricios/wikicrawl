@@ -1,1 +1,1 @@
-from wikicrawl.crawlers import WikiCrawler
+from wikicrawl.crawlers import WikiCrawler, MultiThreadedWikiCrawler

@@ -1,3 +1,5 @@
 from wikicrawl.crawlers.wikicrawler import WikiCrawler
 
-__all__ = ['WikiCrawler']
+from wikicrawl.crawlers.multithreadedwikicrawler import MultiThreadedWikiCrawler
+
+__all__ = ['WikiCrawler', 'MultiThreadedWikiCrawler']
