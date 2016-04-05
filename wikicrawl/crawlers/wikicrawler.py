@@ -34,6 +34,7 @@ class WikiCrawler:
         self.page_title = kwargs.get('page_title', None)
         self.timestamp = kwargs.get('timestamp', None)
         self.node_count = kwargs.get('node_count', None)
+        self.bad_pages = []
         # aliases (titles) to canonical titles table
         self.title_to_ctitle_table = {}
         # canonical title to canonical wiki page (not redirection page) table
@@ -77,8 +78,10 @@ class WikiCrawler:
             if page.isRedirectPage():
                 page = page.getRedirectTarget()
         except Exception as e:
-            print(e, page_title)
-            raise
+            print(e, "page_title:", page_title)
+            self.bad_pages.append(page_title)
+            #raise
+            return None
 
         # canonical title
         ctitle = page.title()
@@ -97,24 +100,28 @@ class WikiCrawler:
         if page_title in self.title_to_ctitle_table:
             return self.title_to_ctitle_table[page_title]
 
-        return self._get_wikipage(page_title).title()
+        page = self._get_wikipage(page_title)
+        if page:
+            return page.title()
+        return None
 
-    def _get_revisions(self, page_title, debug=False):
+    def _get_revisions(self, page_title, starttime, debug=False):
         """"""
+        if debug: print("{0} - _get_revisions starttime {1}".format(page_title, starttime))
         page_title = self._get_canonical_page_title(page_title)
 
         # check canonical title to revisions table
-        #if page_title in self.ctitle_to_revisions:
-        #    return self.ctitle_to_revisions[page_title]
-        if page_title in self.ctitle_to_revids_to_revisions:
-            return self.ctitle_to_revids_to_revisions[page_title].values()
+        #if page_title in self.ctitle_to_revids_to_revisions:
+        #    return sorted(self.ctitle_to_revids_to_revisions[page_title].values(), key=lambda r: r['timestamp'])
 
         page = self._get_wikipage(page_title)
 
         try:
+            self._wiki_site.loadrevisions(page, getText=True, total=1, starttime=starttime)
             # page.revisions() returns a generator
             # sorted property/invariant
-            revisions = sorted(list(page.revisions()), key=lambda r: r['timestamp'])
+            # sorted may be too inefficient
+            revisions = sorted(page._revisions.values(), key=lambda r: r['timestamp'])
         except Exception as e:
             if debug:
                 print(e)
@@ -147,9 +154,7 @@ class WikiCrawler:
                 print("_get_revisionid_before_date: {}".format(end - start))
             return timestamps_to_revid[timestamp]
 
-        revisions = self._get_revisions(page_title, debug)
-
-        revisions = [rev for rev in revisions if rev['timestamp'] < timestamp]
+        revisions = self._get_revisions(page_title, starttime=timestamp, debug=debug)
 
         if debug:
             print("{0} - {1} revisions before {2}".format(page_title, len(revisions), timestamp))
@@ -161,7 +166,7 @@ class WikiCrawler:
 
             end = timer()
             if debug:
-                print("_get_revisionid_before_date: {}".format(end - start))
+                print("Revision id: {0} - _get_revisionid_before_date: {1}".format(revid, (end - start)))
 
             return revid
         else:
@@ -219,8 +224,7 @@ class WikiCrawler:
 
         return pdist
 
-
-    def _get_revision_forward_links(self, page_title, revid):
+    def _get_revision_forward_links(self, page_title, revid, debug=False):
         """"""
         start = timer()
 
@@ -230,7 +234,7 @@ class WikiCrawler:
 
         if revid in revids_to_forwardlinks:
             end = timer()
-            print("_get_revision_forward_links: {}".format(end - start))
+            if debug: print("_get_revision_forward_links: {}".format(end - start))
             return revids_to_forwardlinks[revid]
 
         wikitext = self._get_revision_wikitext(page_title, revid)
@@ -240,7 +244,7 @@ class WikiCrawler:
         revids_to_forwardlinks[revid] = forwardlinks
 
         end = timer()
-        print("_get_revision_forward_links: {}".format(end - start))
+        if debug: print("_get_revision_forward_links: {}".format(end - start))
 
         return forwardlinks
 
@@ -250,6 +254,149 @@ class WikiCrawler:
         """
         return [link for link in WIKILINK_RE.findall(wikitext)
                 if not WIKINAMESPACE_RE.match(link)]
+
+    def _get_div_score(self, title_A, revid_A, title_B, revid_B, div_func):
+        """"""
+        if tuple(sorted([title_A, title_B])) in self.ctitle_and_ctitle_to_div_scores:
+            return self.ctitle_and_ctitle_to_div_scores[(title_A, title_B)]
+        else:
+            pdist_A = self._get_revision_word_dist(title_A, revid_A)
+            pdist_B = self._get_revision_word_dist(title_B, revid_B)
+
+            div = div_func(pdist_A, pdist_B)
+            self.ctitle_and_ctitle_to_div_scores[(title_A, title_B)] = div
+            return div
+
+    def crawl_heuristic_bfs(self, *args, **kwargs):
+        """Heuristic breadth-first search crawl"""
+        page_title = kwargs.get('page_title', self.page_title)
+        timestamp = kwargs.get('timestamp', self.timestamp)
+        node_count = kwargs.get('node_count', self.node_count)
+        #first_layer_only = kwargs.get('first_layer_only', False)
+        div_from_root = kwargs.get('div_from_root', False)
+        div_func = kwargs.get('div_func', lambda x, y: jsd2(x,y))
+
+        debug = kwargs.get('debug', False)
+
+        date_from_revision = kwargs.get('date_from_revision', False)
+
+        graph = nx.Graph(name="{0}&&{1}".format(page_title, timestamp.date()),
+                         starting_node=page_title, starting_date=timestamp, year=timestamp.year)
+
+        self.graphs.append(graph)
+
+        if debug: print("WikiCrawler.crawl_wiki starting")
+
+        q = queue.PriorityQueue()
+
+        visited = set()
+
+        q.put((0, page_title))
+
+        root_pdist = None
+        root_title = None
+        root_revid = None
+
+        #for score, page_title in iter(q.get, None):
+        while not q.empty():
+            score, page_title = q.get()
+
+            if page_title in visited:
+                continue
+
+            if len(graph) > node_count:
+                break
+
+            visited.add(page_title)
+
+            if debug: print("{0}".format(page_title))
+
+            revid = self._get_revisionid_before_date(page_title, timestamp, debug)
+
+            if not revid:
+                if debug: print("{0} - no revid found".format(page_title))
+                continue
+
+            # Crawl by prioritizing article links with smaller JS divergence
+            if not root_pdist and div_from_root:
+                root_pdist = self._get_revision_word_dist(page_title, revid)
+
+                root_title = page_title
+
+                root_revid = revid
+
+                if debug:
+                    print("{0}: root_pdist's top 3: {1}".format(page_title,
+                                                                root_pdist.most_common(3)))
+
+            #current_pdist = self._get_revision_word_dist(page_title, revid)
+
+            forward_links = self._get_revision_forward_links(page_title, revid, debug)
+
+            if debug:
+                print("{0}: {1} nodes".format(page_title, len(graph)))
+                print("{0}: {1} forward links ".format(page_title, len(forward_links)))
+
+            forward_links = [self._get_canonical_page_title(link)
+                             for link in forward_links]
+
+            forward_links = [flink for flink in forward_links if flink]
+
+            for forward_link in forward_links:
+                if forward_link:
+                    flink_revid = self._get_revisionid_before_date(forward_link, timestamp)
+
+                    if not flink_revid:
+                        continue
+
+                    if div_from_root:
+                        div = self._get_div_score(root_title, root_revid, forward_link, flink_revid, div_func=div_func)
+
+                        #div = div_func(root_pdist, flink_pdist)
+                        q.put((div, forward_link))
+
+                    #div = div_func(current_pdist, flink_pdist)
+
+                    if not div_from_root:
+                        div = self._get_div_score(page_title, revid, forward_link, flink_revid, div_func=div_func)
+                        q.put((div, forward_link))
+
+                    if debug:
+                        print("{0} -> {1} - divergence: {2}".format(page_title, forward_link, div))
+
+                    graph.add_edge(page_title, forward_link, div=div, revid=flink_revid)
+
+            if debug: print()
+        return
+
+    def crawl_time_series(self, *args, **kwargs):
+        timestamp = self.timestamp = kwargs.get('timestamp', self.timestamp)
+
+        time_series_interval = kwargs.get('time_series_interval', 'monthly')
+        crawl_type = kwargs.get('crawl_type', 'heuristic')
+        debug = kwargs.get('debug', False)
+
+        time_series_payload = []
+
+        if time_series_interval == 'monthly':
+            intervals = [datetime(year, month, 1)
+                         for year in range(timestamp.year, 2017)
+                         for month in range(1, 13)]
+        elif time_series_interval == 'yearly':
+            intervals = [datetime(year, 1, 1)
+                         for year in range(timestamp.year, 2017)]
+
+        for interval in intervals:
+            kwargs['timestamp'] = interval
+
+            if debug: print("Date: {}".format(interval))
+            if crawl_type == 'heuristic':
+
+                self.crawl_heuristic_bfs(**kwargs)
+            else:
+                self.crawl(**kwargs)
+
+        return
 
     def crawl(self, *args, **kwargs):
         """Breadth-first search crawl"""
@@ -307,144 +454,6 @@ class WikiCrawler:
             if debug: print()
 
         return #graph.edges()
-
-    def _get_div_score(self, title_A, revid_A, title_B, revid_B, div_func):
-        """"""
-        if tuple(sorted([title_A, title_B])) in self.ctitle_and_ctitle_to_div_scores:
-            return self.ctitle_and_ctitle_to_div_scores[(title_A, title_B)]
-        else:
-            pdist_A = self._get_revision_word_dist(title_A, revid_A)
-            pdist_B = self._get_revision_word_dist(title_B, revid_B)
-
-            div = div_func(pdist_A, pdist_B)
-            self.ctitle_and_ctitle_to_div_scores[(title_A, title_B)] = div
-            return div
-
-    def crawl_heuristic_bfs(self, *args, **kwargs):
-        """Heuristic breadth-first search crawl"""
-        page_title = kwargs.get('page_title', self.page_title)
-        timestamp = kwargs.get('timestamp', self.timestamp)
-        node_count = kwargs.get('node_count', self.node_count)
-        #first_layer_only = kwargs.get('first_layer_only', False)
-        div_from_root = kwargs.get('div_from_root', False)
-        div_func = kwargs.get('div_func', lambda x, y: jsd2(x,y))
-
-        debug = kwargs.get('debug', False)
-
-        date_from_revision = kwargs.get('date_from_revision', False)
-
-        graph = nx.Graph(name="{0}&&{1}".format("".join(page_title.split()), timestamp.date()))
-
-        self.graphs.append(graph)
-
-        if debug: print("WikiCrawler.crawl_wiki starting")
-
-        q = queue.PriorityQueue()
-
-        visited = set()
-
-        q.put((0, page_title))
-
-        root_pdist = None
-        root_title = None
-        root_revid = None
-
-        for score, page_title in iter(q.get, None):
-            if page_title in visited:
-                continue
-
-            if len(graph) > node_count:
-                break
-
-            visited.add(page_title)
-
-            if debug: print("{0}".format(page_title))
-
-            revid = self._get_revisionid_before_date(page_title, timestamp, debug)
-
-            if not revid:
-                continue
-
-            # Crawl by prioritizing article links with smaller JS divergence
-            if not root_pdist and div_from_root:
-                root_pdist = self._get_revision_word_dist(page_title, revid)
-
-                root_title = page_title
-
-                root_revid = revid
-
-                if debug:
-                    print("{0}: root_pdist's top 3: {1}".format(page_title,
-                                                                root_pdist.most_common(3)))
-
-            #current_pdist = self._get_revision_word_dist(page_title, revid)
-
-            forward_links = self._get_revision_forward_links(page_title, revid)
-
-            if debug:
-                print("{0}: {1} nodes".format(page_title, len(graph)))
-                print("{0}: {1} forward links ".format(page_title, len(forward_links)))
-
-            forward_links = [self._get_canonical_page_title(link)
-                             for link in forward_links]
-
-            for forward_link in forward_links:
-                if forward_link:
-                    flink_revid = self._get_revisionid_before_date(forward_link, timestamp)
-
-                    if not flink_revid:
-                        continue
-
-                    if div_from_root:
-                        div = self._get_div_score(root_title, root_revid, forward_link, flink_revid, div_func=div_func)
-
-                        #div = div_func(root_pdist, flink_pdist)
-                        q.put((div, forward_link))
-
-                    #div = div_func(current_pdist, flink_pdist)
-
-                    if not div_from_root:
-                        div = self._get_div_score(page_title, revid, forward_link, flink_revid, div_func=div_func)
-                        q.put((div, forward_link))
-
-                    if debug:
-                        print("{0} -> {1} - divergence: {2}".format(page_title, forward_link, div))
-
-                    graph.add_edge(page_title, forward_link, div=div, revid=flink_revid)
-
-            if debug: print()
-
-        return
-
-    def crawl_time_series(self, *args, **kwargs):
-        timestamp = self.timestamp = kwargs.get('timestamp', self.timestamp)
-
-        time_series_interval = kwargs.get('time_series_interval', 'monthly')
-        crawl_type = kwargs.get('crawl_type', 'heuristic')
-        debug = kwargs.get('debug', False)
-
-        time_series_payload = []
-
-
-        if time_series_interval == 'monthly':
-            intervals = [datetime(year, month, 1)
-                         for year in range(timestamp.year, 2017)
-                         for month in range(1, 13)]
-        elif time_series_interval == 'yearly':
-            intervals = [datetime(year, 1, 1)
-                         for year in range(timestamp.year, 2017)]
-
-        for interval in intervals:
-            kwargs['timestamp'] = interval
-
-            if debug: print("Date: {}".format(interval))
-            if crawl_type == 'heuristic':
-
-                self.crawl_heuristic_bfs(**kwargs)
-            else:
-                self.crawl(**kwargs)
-
-        return
 
     def crawl_iter(self, *args, **kwargs):
         """"""
